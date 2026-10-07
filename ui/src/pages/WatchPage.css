@@ -58,6 +58,7 @@
   background: #000;
 }
 .watch-player iframe { width: 100%; height: 100%; border: none; display: block; }
+.watch-player:fullscreen { width: 100vw; height: 100vh; aspect-ratio: auto; }
 .watch-player-yt { width: 100%; height: 100%; }
 .watch-player-yt:focus { outline: none; }
 @media (max-width: 640px) {

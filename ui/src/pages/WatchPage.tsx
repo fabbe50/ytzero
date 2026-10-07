@@ -298,6 +298,7 @@ export default function WatchPage() {
                 <LocalPlayer
                   key={`${video.video_id}-native-${sharedStartSeconds}`}
                   ref={playerRef}
+                  fullscreenTargetRef={playerWrapRef}
                   live
                   liveLabel={t("watchStreamingBadge")}
                   durationSeconds={colonDurationToSeconds(video.duration)}
@@ -336,6 +337,7 @@ export default function WatchPage() {
                 <LocalPlayer
                   key={`${video.video_id}-native-${sharedStartSeconds}`}
                   ref={playerRef}
+                  fullscreenTargetRef={playerWrapRef}
                   hls={playerKind === "direct" && !directProgressive}
                   durationSeconds={parseVideoDurationSeconds(video.duration) ?? undefined}
                   src={playerKind === "direct" ? (directProgressive ? api.directStreamUrl(video.video_id) : api.directHlsUrl(video.video_id)) : api.streamUrl(video.video_id)}

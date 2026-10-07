@@ -1331,7 +1331,8 @@ export function useWatchPageController(audioModeRequested: boolean = false) {
 
   useDocumentTitle((video?.title ?? videoInfo?.title ?? "").trim() || (id ? `Video ${id}` : "Video"));
 
-  if (!video && !videoMissing) return null;
+  // Keep the page-owned fullscreen container mounted while the next playlist
+  // item loads. Removing it causes the browser to leave fullscreen.
 
   const reload = () => video && api.video(video.video_id).then((r) => setVideo(r.video));
 

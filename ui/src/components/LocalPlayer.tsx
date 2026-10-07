@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, RefObject } from "react";
 import { ArrowDownToLine, Camera, Clapperboard, LoaderCircle, Maximize, Minimize, MonitorPlay, Pause, PictureInPicture2, Play, Volume2, VolumeX } from "lucide-react";
 import type { AvailableSubtitle, SponsorSegment, VideoChapter, VideoSubtitle } from "../api";
 import { api, SB_CATEGORIES } from "../api";
@@ -66,6 +66,8 @@ const LocalPlayer = forwardRef<LocalPlayerHandle, {
   startSeconds?: number;
   playbackRate?: number;
   autoplay?: boolean;
+  /** A stable page-owned container that survives playlist item changes. */
+  fullscreenTargetRef?: RefObject<HTMLDivElement>;
   /** Locks viewer-initiated play, pause, seek, and speed changes while still
    * allowing imperative room-sync commands through `LocalPlayerHandle`. */
   transportLocked?: boolean;
@@ -115,6 +117,7 @@ const LocalPlayer = forwardRef<LocalPlayerHandle, {
   startSeconds = 0,
   playbackRate = 1,
   autoplay = true,
+  fullscreenTargetRef,
   transportLocked = false,
   title,
   channelTitle,
@@ -401,11 +404,11 @@ const LocalPlayer = forwardRef<LocalPlayerHandle, {
   }, [showControls, transportLocked]);
 
   const toggleFullscreen = useCallback(() => {
-    const el = rootRef.current;
+    const el = fullscreenTargetRef?.current ?? rootRef.current;
     if (!el) return;
     if (document.fullscreenElement) document.exitFullscreen?.();
     else el.requestFullscreen?.();
-  }, []);
+  }, [fullscreenTargetRef]);
 
   const clearPendingTouchTap = useCallback(() => {
     if (touchTapTimerRef.current !== null) window.clearTimeout(touchTapTimerRef.current);
@@ -513,10 +516,19 @@ const LocalPlayer = forwardRef<LocalPlayerHandle, {
   }, [channelTitle, onShortcut, screenshotFilenameTemplate, screenshotFormat, screenshotQuality, showControls, title, videoId]);
 
   useEffect(() => {
-    const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    const onFs = () => {
+      const fullscreen = document.fullscreenElement;
+      const active = Boolean(fullscreen && rootRef.current && fullscreen.contains(rootRef.current));
+      setIsFullscreen(active);
+      if (active) {
+        videoRef.current?.focus({ preventScroll: true });
+        showControls();
+      }
+    };
+    onFs();
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
-  }, []);
+  }, [showControls]);
 
   // Keyboard: playback-local keys. Page navigation, theater and the app-level
   // page-owned modes stay in WatchPage so they behave identically for every source.
@@ -737,7 +749,7 @@ const LocalPlayer = forwardRef<LocalPlayerHandle, {
         onPlay={() => { setPlaying(true); endedRef.current = false; showControls(); }}
         onPause={() => { setPlaying(false); setControlsVisible(true); }}
         onWaiting={() => setBuffering(true)}
-        onPlaying={() => setBuffering(false)}
+        onPlaying={() => { setBuffering(false); setPlaying(true); showControls(); }}
         onCanPlay={() => setBuffering(false)}
         onTimeUpdate={(e) => {
           // The custom slider is the source of truth. In particular, preserve
