@@ -81,15 +81,18 @@ export default function WatchPage() {
   const activeVideoId = controller?.id;
   const focusPlayerKind = controller?.playerKind;
   const focusAudioActive = controller?.audioActive;
+  const focusTransportLocked = controller?.watchTogetherTransportLocked;
   const focusPlayerWrapRef = controller?.playerWrapRef;
   const playerReady = Boolean(controller);
   useEffect(() => {
     const wrap = focusPlayerWrapRef?.current;
     if (!activeVideoId || !wrap || (!focusAudioActive && !["local", "stream", "direct", "youtube"].includes(focusPlayerKind ?? ""))) return;
-    // The top bar survives route changes. Focus the player surface, keeping
-    // YouTube keys in this document: iframe key events cannot reach F here.
+    // YouTube must receive the actual key event to activate its own fullscreen
+    // UI. Fullscreening the iframe from the host bypasses those controls.
     const focusPlayer = () => {
-      const target = wrap.querySelector<HTMLElement>(focusAudioActive ? ".audio-mode-player" : focusPlayerKind === "youtube" ? ".watch-player-yt" : ".lp-video");
+      const youtubeSelector = focusTransportLocked ? ".watch-player-yt" : ".watch-player-yt iframe";
+      const selector = focusAudioActive ? ".audio-mode-player" : focusPlayerKind === "youtube" ? youtubeSelector : ".lp-video";
+      const target = wrap.querySelector<HTMLElement>(selector);
       if (!target) return false;
       target.focus({ preventScroll: true });
       return true;
@@ -100,7 +103,7 @@ export default function WatchPage() {
     });
     observer.observe(wrap, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [activeVideoId, focusAudioActive, focusPlayerKind, focusPlayerWrapRef, playerReady]);
+  }, [activeVideoId, focusAudioActive, focusPlayerKind, focusPlayerWrapRef, focusTransportLocked, playerReady]);
   if (!controller) return null;
   const {
     activePlaylistItemRef,
@@ -236,6 +239,7 @@ export default function WatchPage() {
     watchTogetherTransportLocked,
     youtubeAutoplayBlocked,
     youtubeError,
+    youtubeMounted,
     ytWrapRef,
   } = controller;
   const playbackSpeeds = resolvePlaybackSpeeds(settings?.player_speed_options, speed, video?.channel_playback_speed);
@@ -265,6 +269,7 @@ export default function WatchPage() {
               ref={playerWrapRef}
               className={`watch-player${audioActive ? " watch-player--audio" : ""}${usingLocal ? " watch-player--local" : ""}${watchTogetherTransportLocked ? " watch-player--transport-locked" : ""}`}
             >
+              <div ref={ytWrapRef} className="watch-player-yt" hidden={!youtubeMounted} tabIndex={-1} aria-label={video?.title} />
               {audioActive && video ? (
                 <Suspense fallback={null}>
                   <AudioModePlayer {...resolveWatchAudioSources({
@@ -374,9 +379,7 @@ export default function WatchPage() {
                   onDownload={playerKind === "direct" && downloadsEnabled && downloadStatus !== "queued" && downloadStatus !== "downloading" ? requestDownload : undefined}
                   downloadLabel={t("downloadLocally")}
                 />
-              ) : playerKind === "youtube" ? (
-                <div ref={ytWrapRef} className="watch-player-yt" tabIndex={-1} aria-label={video?.title} />
-              ) : playerKind === "loading" ? (
+              ) : playerKind === "youtube" ? null : playerKind === "loading" ? (
                 <div className="wp-panel" style={video ? { backgroundImage: `url(${videoThumbnail(video.thumbnail)})` } : undefined}>
                   <div className="wp-panel-scrim" />
                   <div className="wp-panel-content" aria-busy="true">

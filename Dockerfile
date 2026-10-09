@@ -41,7 +41,8 @@ RUN bun install --production
 COPY app/src ./src
 COPY app/scripts ./scripts
 COPY shared/ /shared/
-RUN chmod 0755 ./scripts/provision-ytdlp.sh
+# Normalize Windows checkouts before Linux executes the script's shebang.
+RUN sed -i 's/\r$//' ./scripts/provision-ytdlp.sh && chmod 0755 ./scripts/provision-ytdlp.sh
 COPY --from=ui-build /ui/dist ./public
 
 ARG YTZERO_VERSION

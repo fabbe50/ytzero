@@ -21,8 +21,11 @@ import { sessionPlayQueueContext, useSessionPlayQueue } from "../sessionPlayQueu
 import { effectivePlaybackQueue } from "../sessionPlayQueuePlayback";
 import { isContinuousPlaylistQueue, playbackEndAction } from "../playlistPlayback";
 import { restoreSidebarVisibility } from "../app-shell/sidebarVisibility";
-import { canAutoArchiveVideo, isMissingVideoError, loadYouTubeApi, resolveShareTimestamp, resolveWatchPlayerTarget, resolveWatchRoutePreview } from "./watchRuntime";
-import { captionPlayerVars, resolveWatchCaptions } from "./watchCaptions";
+import { canAutoArchiveVideo, isMissingVideoError, resolveShareTimestamp, resolveWatchPlayerTarget, resolveWatchRoutePreview } from "./watchRuntime";
+import { resolveWatchCaptions } from "./watchCaptions";
+import { useWatchYouTubePlayer } from "./useWatchYouTubePlayer";
+import { toggleWatchFullscreen } from "./watchFullscreen";
+import { applyEmbeddedPlayerCommand } from "./embeddedPlayerCommand";
 import { useWatchTogetherPlayback } from "./useWatchTogetherPlayback";
 import { useYouTubeKeyboardShortcuts, type WatchShortcutKind } from "./useYouTubeKeyboardShortcuts";
 import { useUpNextQueue } from "./useUpNextQueue";
@@ -808,8 +811,33 @@ export function useWatchPageController(audioModeRequested: boolean = false) {
     return () => document.removeEventListener(ENHANCE_BRIDGE_EVENTS.playerEvent, onPlayerEvent);
   }, [audioActive, canPlayNextVideo, canPlayPreviousVideo, closeWatchMode, id, keyboardSeekSeconds, navigate, playerKind, playNextVideo, playPreviousVideo, showShortcutFeedback, watchTogetherRoomId]);
 
-  // Create the player (YT iframe or the ref populated by LocalPlayer) and poll
-  // progress every second. The poll runs against the shared YT-shaped player
+  // Keep the YouTube iframe alive while a new route's metadata is loading.
+  // It is disposed only when a resolved source replaces YouTube or we leave.
+  const youtubeMounted = !audioActive && !membersOnlyNotice && (playerKind === "youtube" || !playerTargetId);
+  useWatchYouTubePlayer({
+    enabled: youtubeMounted,
+    target: playerKind === "youtube" && playerTargetId ? {
+      videoId: playerTargetId, startSeconds: playbackStartSeconds,
+      sharedStartSeconds, autoplay: !watchTogetherRoomId,
+    } : null,
+    wrapRef: ytWrapRef, playerRef, title: matchingVideo?.title ?? "",
+    language: settings?.player_hl, quality: settings?.player_quality,
+    speed: Number(speed), captionsOn: captionsDefaultOn,
+    captionsLanguage: captionsDefaultLang, captionsOff: channelCaptionsOff,
+    transportLocked: watchTogetherTransportLocked,
+    requestPlayback: requestYouTubePlayback,
+    onEnded: () => handleEndedRef.current(),
+    onAutoplayBlocked: () => setYoutubeAutoplayBlocked(true),
+    onError: (code) => {
+      setYoutubeError(code);
+      if (shouldFallbackToDirectStream(code)) {
+        capturePlaybackPosition();
+        setDirectFallback(true);
+      }
+    },
+  });
+
+  // Poll progress every second against the shared YT-shaped player
   // API, so progress saving, auto-archive and SponsorBlock work for both.
   useEffect(() => {
     if (!playerTargetId) return;
@@ -821,8 +849,6 @@ export function useWatchPageController(audioModeRequested: boolean = false) {
     const isStream = playerKind === "stream" && !audioActive;
     let wasPlaying = false;
     let lastLifecycleFlushAt = 0;
-
-    const startSeconds = playbackStartSeconds;
 
     const poll = () => {
       const p = playerRef.current;
@@ -930,114 +956,11 @@ export function useWatchPageController(audioModeRequested: boolean = false) {
       };
     }
 
-    // Decision/waiting/blocked panels have no player to drive. Audio mode swaps
-    // the iframe for the standalone <audio> proxy, so skip creating it entirely.
     if (playerKind !== "youtube") return;
-
-    const wrap = ytWrapRef.current;
-    if (!wrap) return;
+    const pollInterval = setInterval(poll, 1_000);
     attachPageLifecycle();
-
-    const playerVars: Record<string, any> = {
-      autoplay: watchTogetherRoomId ? 0 : 1,
-      rel: 0,
-      iv_load_policy: 3,
-      playsinline: 1,
-      origin: window.location.origin,
-    };
-    if (startSeconds > 10) playerVars.start = startSeconds;
-    if (settings?.player_hl) playerVars.hl = settings.player_hl;
-    Object.assign(playerVars, captionPlayerVars(captionsDefaultOn, captionsDefaultLang));
-    if (settings?.player_quality && settings.player_quality !== "auto") playerVars.vq = settings.player_quality;
-
-    let pollInterval: ReturnType<typeof setInterval>;
-    let destroyed = false;
-    let youtubePlayer: WatchPlayerHandle | null = null;
-    // YT resets the rate to 1× on load, so apply the desired speed once the
-    // player is ready and again on the first PLAYING event to make it stick.
-    let speedApplied = false;
-    const applySpeed = (p: any) => {
-      try { p?.setPlaybackRate(Number(speedRef.current)); } catch {}
-    };
-
-    const inner = document.createElement("div");
-    inner.id = `yt-inner-${activeVideoId}`;
-    wrap.appendChild(inner);
-
-    loadYouTubeApi().then(() => {
-      if (destroyed) return;
-      const w = window as any;
-      youtubePlayer = new w.YT.Player(`yt-inner-${activeVideoId}`, {
-        host: "https://www.youtube-nocookie.com",
-        videoId: activeVideoId,
-        width: "100%",
-        height: "100%",
-        playerVars,
-        events: {
-          onReady: (e: any) => {
-            if (destroyed) return;
-            applySpeed(e.target);
-            const iframe = e.target?.getIframe?.() as HTMLIFrameElement | undefined;
-            if (iframe) {
-              iframe.setAttribute("aria-label", video?.title ?? "");
-              iframe.removeAttribute("title");
-            }
-            if (watchTogetherTransportLockedRef.current) {
-              if (iframe) iframe.tabIndex = -1;
-            }
-            if (channelCaptionsOff) {
-              try { e.target.unloadModule?.("captions"); } catch {}
-            }
-            if (!watchTogetherRoomId) requestYouTubePlayback();
-          },
-          onAutoplayBlocked: () => {
-            if (!destroyed) setYoutubeAutoplayBlocked(true);
-          },
-          onStateChange: (e: any) => {
-            // 1 === playing: apply the desired speed once (YT resets on load).
-            if (e?.data === 1) {
-              try { if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing"; } catch {}
-              if (!speedApplied) {
-                speedApplied = true;
-                applySpeed(e.target);
-              }
-            }
-            if (e?.data === 2) {
-              try { if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused"; } catch {}
-            }
-            // 0 === ended
-            if (e?.data === 0) {
-              try { if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none"; } catch {}
-              if (!watchTogetherTransportLockedRef.current) handleEndedRef.current();
-            }
-          },
-          onError: (e: any) => {
-            if (destroyed) return;
-            const code = Number(e?.data) || null;
-            setYoutubeError(code);
-            if (shouldFallbackToDirectStream(code)) {
-              capturePlaybackPosition();
-              setDirectFallback(true);
-            }
-          },
-        },
-      });
-      playerRef.current = youtubePlayer;
-
-      pollInterval = setInterval(poll, 1_000);
-    });
-
-    return () => {
-      destroyed = true;
-      clearInterval(pollInterval);
-      saveOnExit();
-      if (youtubePlayer) {
-        try { youtubePlayer.destroy(); } catch {}
-        if (playerRef.current === youtubePlayer) playerRef.current = null;
-      }
-      while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
-    };
-  }, [playerTargetId, membersOnlyNotice, playerKind, audioActive, requestYouTubePlayback, captionsDefaultOn, captionsDefaultLang, channelCaptionsOff, sharedStartSeconds]);
+    return () => { clearInterval(pollInterval); saveOnExit(); };
+  }, [playerTargetId, membersOnlyNotice, playerKind, audioActive, sharedStartSeconds]);
 
   useYouTubeMediaSession({ audioActive, playerKind, playerRef, video, watchTogetherTransportLocked, onNext: canPlayNextVideo ? playNextVideo : undefined, onPrevious: canPlayPreviousVideo ? playPreviousVideo : undefined });
 
@@ -1172,11 +1095,18 @@ export function useWatchPageController(audioModeRequested: boolean = false) {
       else if (matches("toggleFullscreen", e) && playerKind !== "local" && playerKind !== "stream" && playerKind !== "direct") {
         e.preventDefault();
         if (!e.repeat) {
-          const el = playerWrapRef.current ?? document.documentElement;
-          // requestFullscreen needs the keydown's user activation. Waiting for
-          // an extension command result can leave the fallback unable to open.
-          if (!document.fullscreenElement) void el.requestFullscreen?.();
-          else void document.exitFullscreen?.();
+          const iframe = playerKind === "youtube" ? playerRef.current?.getIframe?.() : undefined;
+          if (iframe && !audioActive && !document.fullscreenElement) {
+            // Enhance can enter fullscreen inside the player document. Without
+            // it, focus YouTube so its next trusted F event uses native controls.
+            iframe.focus({ preventScroll: true });
+            void applyEmbeddedPlayerCommand({
+              audioActive, playerKind, videoId: id, command: "enter-fullscreen",
+              fallback: () => toggleWatchFullscreen(playerWrapRef.current ?? document.documentElement, iframe),
+              shouldFallback: () => playerRef.current?.getIframe?.() === iframe
+                && document.activeElement === iframe && !document.fullscreenElement,
+            });
+          } else toggleWatchFullscreen(playerWrapRef.current ?? document.documentElement, iframe);
         }
       }
     };
@@ -1614,5 +1544,6 @@ export function useWatchPageController(audioModeRequested: boolean = false) {
     youtubeAutoplayBlocked,
     youtubeError,
     ytWrapRef,
+    youtubeMounted,
   };
 }
